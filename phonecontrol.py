@@ -1,0 +1,306 @@
+# ------------- main.py ------------- #
+import network, socket, ure, json, uerrno
+from machine import Pin, PWM
+from time import sleep_ms
+
+DEBUG = True
+
+_ERRNO_EAGAIN = uerrno.EAGAIN
+try:
+    _ERRNO_EWOULDBLOCK = uerrno.EWOULDBLOCK
+except AttributeError:              # not available -> treat as EAGAIN
+    _ERRNO_EWOULDBLOCK = _ERRNO_EAGAIN
+
+
+def _log(*a):
+    if DEBUG:
+        print("[LOG]", *a)
+
+
+# ------------------------------------------------------------------------
+#  Hardware Abstractions
+# ------------------------------------------------------------------------
+class Train:
+    """Generic H-bridge DC motor train with direction pins and PWM speed."""
+    # TODO: Change to send signals to radio RX instead
+    def __init__(self, name, dir_pin_1, dir_pin_2, pwm_pin, freq=1000):
+        self.name = name
+        self.freq = freq
+        # TODO: use actual pins
+        self._in1 = Pin(dir_pin_1, Pin.OUT)
+        self._in2 = Pin(dir_pin_2, Pin.OUT)
+        self._pwm = PWM(Pin(pwm_pin))
+        self._pwm.freq(self.freq)
+        self._speed = 0
+        self.stop()
+
+    # ---------- public API ----------
+    def mocked(self, name):
+        if DEBUG: print(f"\n\nMocked funcionality: {name}\n\n")
+        else: print("[REMAINDER: Remove mocking]")
+
+    def forward(self, speed_pct=None):
+        if speed_pct is not None:
+            self.set_speed(speed_pct)
+        self._in1.value(1); self._in2.value(0)
+        self.mocked("foward")
+        return
+
+    def backward(self, speed_pct=None):
+        if speed_pct is not None:
+            self.set_speed(speed_pct)
+        self._in1.value(0); self._in2.value(1)
+        self.mocked("backward")
+        return
+
+    def is_moving(self):
+        return self._speed > 0
+
+    def change_speed(self, delta):
+        """±delta percentage points, clamped 0-100."""
+        self.set_speed(self._speed + delta)
+        self.mocked(f"change_speed to {self.speed + delta}")
+        return
+
+    def toggle(self):
+        if self.is_moving():
+            self.stop()
+            mocked_message = "from moving to stopped"
+        else:                       # restart in last dir at 50 %
+            self.forward(50)        # TODO: pick a better default
+            mocked_message = "from stopped to moving"
+        self.mocked(f"toggled {mocked_message}")
+        return
+
+    def stop(self):
+        self._in1.value(0); self._in2.value(0)
+        self._pwm.duty_u16(0)
+        self._speed = 0
+        self.mocked("stop")
+        return
+
+    def set_speed(self, speed_pct: int):
+        """0–100 → 0–65535 duty"""
+
+        self._speed = max(0, min(100, speed_pct))
+        duty = int(self._speed * 65535 // 100)
+        self._pwm.duty_u16(duty)
+        self.mocked(f"set_speed to {self._speed}, duty: {duty}")
+        return
+
+    # ---------- helpers ----------
+    def serialize(self):
+        return {"name": self.name, "speed": self._speed, "freq": self.freq}
+
+# ------------------------------------------------------------------------
+#  Train Manager – Data structure to store trains instances
+# ------------------------------------------------------------------------
+class TrainManager:
+    def __init__(self):
+        self._trains = {}
+
+    def add(self, train: Train):
+        self._trains[train.name] = train
+
+    def get(self, name) -> Train:
+        return self._trains[name]
+
+    def all(self):
+        return list(self._trains.values())
+
+    # REST-style helpers --------------------------------------------------
+    def handle_action(self, train_name, action, value=None):
+        train = self.get(train_name)
+        if action == "forward":
+            train.forward(int(value) if value else None)
+        elif action == "backward":
+            train.backward(int(value) if value else None)
+        elif action == "stop":
+            train.stop()
+        elif action == "speed":
+            train.set_speed(int(value))
+        elif action == "inc":
+            train.change_speed(+10)
+        elif action == "dec":
+            train.change_speed(-10)
+        elif action == "toggle":
+            train.toggle()
+        return train.serialize()
+
+    def create_from_args(self, name, pwm_pin, freq):
+        pwm = int(pwm_pin)
+        f   = int(freq)
+        # simple heuristic: dir pins = pwm±1
+        train   = Train(name, dir_pin_1=pwm-1, dir_pin_2=pwm+1, pwm_pin=pwm, freq=f)
+        self.add(train)
+        return train.serialize()
+
+# ------------------------------------------------------------------------
+#  Wi-Fi Access Point
+# ------------------------------------------------------------------------
+def start_ap():
+    AP = network.WLAN(network.AP_IF)
+    AP.config(essid="PicoMotor", password="12345678")
+    AP.active(True)
+    while not AP.active():
+        sleep_ms(100)
+    print("AP started →", AP.ifconfig()[0])
+
+# ------------------------------------------------------------------------
+#  Minimal HTTP server – no blocking on multiple clients
+# ------------------------------------------------------------------------
+
+class WebServer:
+    _html = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name=viewport content="width=device-width,initial-scale=1">
+<style>
+body{font-family:sans-serif;text-align:center;background:#111;color:#eee}
+h1{margin-top:.5em}.card{display:inline-block;padding:1em;margin:1em;border:1px solid #555;border-radius:8px}
+button,input[type=range],input[type=number],input[type=text]{width:90%%;padding:.6em;margin:.3em;background:#333;color:#fff;border:none;border-radius:6px;font-size:1em}
+button:active{background:#555}
+form{border:1px solid #333;padding:1em;border-radius:8px;margin:1em;display:inline-block}
+</style></head><body>
+<h1>Controle Trens</h1>
+
+<form onsubmit="addTrain(event)">
+  <h2>Adicionar Trem</h2>
+  <input type="text"   id="n"  placeholder="Nome" value ="TremB" required>
+  <input type="number" id="p"  placeholder="Porta" value="15" required>
+  <input type="number" id="f"  placeholder="Freq (Hz)" value="2000" required>
+  <button>Adicionar</button>
+</form>
+
+<div id="cards"></div>
+<script>
+function api(p){return fetch(p).then(r=>r.json())}
+function addTrain(e){
+  e.preventDefault();
+  const name=n.value.trim(), pin=p.value.trim(), freq=f.value.trim();
+  if(!name||!pin||!freq)return;
+  api(`/add?name=${name}&pwm=${pin}&freq=${freq}`).then(refresh);
+  e.target.reset();
+}
+function card(train){return`
+<div class="card" id="${train.name}">
+  <h2>${train.name} <small>${train.freq} Hz</small></h2>
+  <button onclick="api('/${train.name}/forward')">⏩ Para Frente</button>
+  <button onclick="api('/${train.name}/backward')">⏪ Ré</button>
+  <button onclick="api('/${train.name}/toggle')">
+      ${train.speed>0?'⏹ Parar':'▶ Andar'}</button><br>
+  <button onclick="api('/${train.name}/inc')">➕ Mais rápido</button>
+  <button onclick="api('/${train.name}/dec')">➖ Mais devagar</button>
+  <p>Velocidade&nbsp;${train.speed}%</p>
+</div>`}
+function refresh(){api('/status').then(a=>cards.innerHTML=a.map(card).join(''))}
+setInterval(refresh,1500);refresh();
+</script></body></html>"""
+
+    def __init__(self, manager):
+        self._m = manager
+        addr = socket.getaddrinfo("0.0.0.0", 80)[0][-1]
+        self._sock = socket.socket()
+        self._sock.bind(addr)
+        self._sock.listen(5)
+        self._sock.settimeout(0)
+
+    def loop(self):
+        try:
+            cl, addr = self._sock.accept()
+        except OSError as e:
+            #if e.args[0] in (uerrno.EAGAIN, uerrno.EWOULDBLOCK):
+            if e.args[0] in (uerrno.EAGAIN, 1):
+                return                  # no pending client
+            raise
+
+        _log("Client", addr)
+        cl.settimeout(2)               # block up to 2 s for HTTP request
+
+        try:
+            req = cl.recv(1024)
+        except OSError as e:
+            _log("recv() error:", e)
+            cl.close(); return
+
+        if not req:
+            _log("empty request"); cl.close(); return
+
+        try:
+            route = ure.search(r"GET /(.*?) ", req.decode()).group(1)
+        except Exception as e:
+            _log("parse error:", e)
+            self._send(cl, 400, "text/plain", "Bad request")
+            cl.close(); return
+
+        _log("Route =", route)
+
+        # ---------- Static page ----------
+        if route in ("", "index.html"):
+            self._send(cl, 200, "text/html", self._html)
+
+        # ---------- API ----------
+        elif route == "status":
+            data = [train.serialize() for train in self._m.all()]
+            self._send(cl, 200, "application/json", json.dumps(data))
+
+        # ---------- Add train ----------
+        elif route.startswith("add?"):
+            qs = dict(s.split("=",1) for s in route[4:].split("&"))
+            try:
+                state = self._m.create_from_args(qs["name"], qs["pwm"], qs["freq"])
+                self._send(cl, 200, "application/json", json.dumps(state))
+            except Exception as e:
+                _log("add error:", e)
+                self._send(cl, 400, "text/plain", "Bad add params")
+
+        else:
+            parts = route.split("?")
+            core = parts[0].split("/")
+            if len(core) == 2:
+                name, action = core
+                val = None
+                if len(parts) > 1 and parts[1].startswith("val="):
+                    val = parts[1][4:]
+                try:
+                    state = self._m.handle_action(name, action, val)
+                    self._send(cl, 200, "application/json", json.dumps(state))
+                except KeyError:
+                    _log("unknown train", name)
+                    self._send(cl, 404, "text/plain", "Train not found")
+                except Exception as e:
+                    _log("handler error:", e)
+                    self._send(cl, 500, "text/plain", "Internal error")
+            else:
+                self._send(cl, 400, "text/plain", "Bad request")
+
+        cl.close()
+
+    # --------------- helpers ----------------
+    def _send(self, cl, status, ctype, payload):
+        try:
+            cl.send("HTTP/1.1 %d OK\r\nContent-Type:%s\r\nContent-Length:%d\r\n\r\n"
+                    % (status, ctype, len(payload)))
+            cl.send(payload)
+        except Exception as e:
+            _log("send error:", e)
+
+
+
+def main():
+    # ---- create your trains here ----
+    mgr = TrainManager()
+    # TODO: adjust pins
+    mgr.add(Train("TremA", dir_pin_1=2, dir_pin_2=3, pwm_pin=4, freq=1500))
+    #  mgr.add(Train("T2", dir_pin_1=5, dir_pin_2=6, pwm_pin=7))
+
+    start_ap()
+    server = WebServer(mgr)
+    print("Server running …")
+
+    while True:
+        server.loop()          # non-blocking, returns immediately
+        sleep_ms(25)           # cooperative multitasking window
+
+if __name__ == "__main__":
+    main()
+
+
