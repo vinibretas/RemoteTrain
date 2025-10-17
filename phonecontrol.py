@@ -58,29 +58,52 @@ CMD8 = CMD.imark()
 
 assert CMD.imark_counter <= COMMAND_MAX_COUNT, f"Commands surpassed maximum limit of {COMMAND_MAX_COUNT}, got {CMD.imark_counter}"
 
+# Modes enum
+MD = IMarker()
+RX_MODE = MD.imark()
+BRIDGE_MODE = MD.imark()
 # ------------------------------------------------------------------------
 #  Hardware Abstractions
 # ------------------------------------------------------------------------
 class Train:
-    """Generic H-bridge DC motor train with direction pins and PWM speed."""
-    # TODO: Change to send signals to radio RX instead
-    def __init__(self, name, pwm_pin, freq=1000):
+    """Generic H-bridge DC motor train with direction pins"""
+    def __init__(self, name, freq=1000, rx_pin = None, foward_pin = None, backward_pin = None, pwm_pin = None):
+        self.pins_dict = {"rx_pin":rx_pin,"foward_pin":foward_pin,"backward_pin":backward_pin,"pwm_pin":pwm_pin}
+        self.pins_str = ", ".join(f"{k} = {v}" for k,v in self.pins_dict.items())
+        if all(v is None for v in self.pins_dict.values()):
+            raise RuntimeError("Must providde either rx_pin or BRIDGE_MODE pins")
+        if rx_pin is not None:
+            if any(k is not None for k in [foward_pin, backward_pin, pwm_pin]):
+                raise RuntimeError(f"Direct drive move is incompatible with rx mode. Provide either rx_pin or foward, backward and pwm pins\nGot: {self.pins_str}")
+            self.mode = RX_MODE
+        elif all(k is not None for k in [foward_pin, backward_pin, pwm_pin]):
+            self.mode = BRIDGE_MODE
+        else:
+            raise RuntimeError(f"Missing bridge mode parameters. Got: foward_pin={foward_pin}, backward_pin={backward_pin}, pwm_pin={pwm_pin}")
+
+
+        if DEBUG:
+            print(f"Current Mode: {self.mode}")
         self.name = name
         self.freq = freq
-        # TODO: use actual pins
-        self._in1 = Pin(dir_pin_1, Pin.OUT)
-        self._in2 = Pin(dir_pin_2, Pin.OUT)
-        self._pwm = PWM(Pin(pwm_pin))
-        self._pwm.freq(1000)           # TODO: pick freq
+        self.rx = Pin(rx_pin, Pin.OUT) if self.mode is RX_MODE else None
+        self.fwd = Pin(foward_pin, Pin.OUT) if self.mode is BRIDGE_MODE else None
+        self.bwd = Pin(backward_pin, Pin.OUT) if self.mode is BRIDGE_MODE else None
+        self.pwm = Pin(pwm_pin, Pin.OUT) if self.mode is BRIDGE_MODE else None
+        if DEBUG:
+            print(f"self.rx = {self.rx}")
+            print(f"self.fwd = {self.fwd}")
+            print(f"self.bwd = {self.bwd}")
+            print(f"self.pwm = {self.pwm}")
         self._speed = 0
         self.stop()
 
     # ---------- public API ----------
-    
+
     def send_command(self, command):
         pass
-    
-    
+
+
     def mocked(self, name):
         print(f"\n\nMocked funcionality: {name}\n\n")
 
@@ -173,11 +196,11 @@ class TrainManager:
             train.toggle()
         return train.serialize()
 
-    def create_from_args(self, name, pwm_pin, freq):
-        pwm = int(pwm_pin)
+    def create_from_args(self, name, rx_pin, freq):
+        pwm = int(rx_pin)
         f   = int(freq)
         # simple heuristic: dir pins = pwm±1
-        train   = Train(name, dir_pin_1=pwm-1, dir_pin_2=pwm+1, pwm_pin=pwm, freq=f)
+        train   = Train(name, dir_pin_1=pwm-1, dir_pin_2=pwm+1, rx_pin=pwm, freq=f)
         self.add(train)
         return train.serialize()
 
@@ -338,12 +361,17 @@ setInterval(refresh,1500);refresh();
 def main():
     if DEBUG or DRY_RUN:
         print(f"Warning: Remember to turn off DEBUG (currently {DEBUG}) and or DRY_RUN (currently {DRY_RUN}) off")
+    t1 = Train("TestTrain", rx_pin = 4)
+    #  t2 = Train("TestTrain", backward_pin = 4, foward_pin=5,pwm_pin=6)
+    #  t3 = Train("TestTrain", backward_pin = 1, foward_pin=1, rx_pin=1)
+    #  t4 = Train("TestTrain")
+    #  t5 = Train("TestTrain", backward_pin = 1)
     assert not DRY_RUN, "DRY_RUN mode on, exiting..."
     # ---- create your trains here ----
     mgr = TrainManager()
     # TODO: adjust pins
-    mgr.add(Train("TremA", dir_pin_1=2, dir_pin_2=3, pwm_pin=4, freq=1500))
-    #  mgr.add(Train("M2", dir_pin_1=5, dir_pin_2=6, pwm_pin=7))
+    mgr.add(Train("TremA", dir_pin_1=2, dir_pin_2=3, rx_pin=4, freq=1500))
+    #  mgr.add(Train("M2", dir_pin_1=5, dir_pin_2=6, rx_pin=7))
     start_ap()
     server = WebServer(mgr)
     print("Server running …")
