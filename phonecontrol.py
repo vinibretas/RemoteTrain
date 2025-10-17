@@ -64,6 +64,11 @@ RX_MODE = MD.imark()
 BRIDGE_MODE = MD.imark()
 
 DEFAULT_MODE = RX_MODE
+
+# Edges enum
+EDGE = IMarker()
+RISING = EDGE.imark()
+FALLING = EDGE.imark()
 # ------------------------------------------------------------------------
 #  Hardware Abstractions
 # ------------------------------------------------------------------------
@@ -88,9 +93,10 @@ class Train:
             print(f"Current Mode: {self.mode}")
         self.name = name
         self.freq = freq
-        self.rx = Pin(rx_pin, Pin.OUT) if self.mode is RX_MODE else None
-        self.fwd = Pin(foward_pin, Pin.OUT) if self.mode is BRIDGE_MODE else None
-        self.bwd = Pin(backward_pin, Pin.OUT) if self.mode is BRIDGE_MODE else None
+        self.period = 1 / freq
+        self.rx = Pin(rx_pin, Pin.OUT, value=0) if self.mode is RX_MODE else None
+        self.fwd = Pin(foward_pin, Pin.OUT,value=0) if self.mode is BRIDGE_MODE else None
+        self.bwd = Pin(backward_pin, Pin.OUT,value=0) if self.mode is BRIDGE_MODE else None
         self.pwm = PWM(Pin(pwm_pin)) if self.mode is BRIDGE_MODE else None
         if self.pwm:
             self.pwm.freq(self.freq)
@@ -105,10 +111,17 @@ class Train:
 
     # ---------- public API ----------
 
-    def send_command(self, command):
+    def send_command(self, command, edge = RISING):
+        if not self.rx: 
+            raise RuntimeError(".send_command method only compatible with rx mode")
         print(f"\n\nMocked send command: Would send {command} pulses!\n\n")
-        pass
-
+        edge = 1 if edge is RISING else 0
+        for k in range(command):
+            self.rx.value(edge)
+            sleep_ms(int(self.period*1000 / 2))
+            self.rx.value(not edge)
+            sleep_ms(int(self.period*1000 / 2))
+        self.rx.value(0)
 
     def mocked(self, name):
         print(f"\n\nMocked funcionality: {name}\n\n")
@@ -153,7 +166,7 @@ class Train:
             self.stop()
             mocked_message = "from moving to stopped"
         else:                       # restart in last dir at 50 %
-            self.forward(50)        # TODO: pick a better default
+            self.forward(50 if self.mode is BRIDGE_MODE else None)
             mocked_message = "from stopped to moving"
         self.mocked(f"toggled {mocked_message}")
         return
