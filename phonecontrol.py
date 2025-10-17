@@ -4,18 +4,59 @@ from machine import Pin, PWM
 from time import sleep_ms
 
 DEBUG = True
+DRY_RUN = True
 
 _ERRNO_EAGAIN = uerrno.EAGAIN
 try:
     _ERRNO_EWOULDBLOCK = uerrno.EWOULDBLOCK
-except AttributeError:              # not available -> treat as EAGAIN
+except AttributeError:              # not available ⇒ treat as EAGAIN
     _ERRNO_EWOULDBLOCK = _ERRNO_EAGAIN
 
+COMMAND_MAX_COUNT = 8
 
 def _log(*a):
     if DEBUG:
         print("[LOG]", *a)
 
+class IMarker:
+    def __init__(self, start_at = 0):
+        self.imark_counter = start_at - 1
+
+    def imark(self, reset = False):
+        if reset: self.imark_counter = start_at
+        # Increase counter before returning it
+        self.imark_counter += 1
+        # retrieves current I counter
+        return self.imark_counter
+    def imark_range(self, max_ = None,min_ = None, step = 1):
+        if max_ is None:
+            assert False, "Must provide `max_` arg"
+        else:
+            if min_ is not None:
+                min_,max_ = max_,min_
+        if min_ is None:
+            min_ = 0
+        output = []
+        for k in range(min_,max_,step):
+            output.append(self.imark())
+        return tuple(output)
+
+    def __str__(self):
+        return f"{self.imark_counter}"
+
+# Enum for commands
+CMD = IMarker(1)
+GO = CMD.imark()
+FOWARD = CMD.imark()
+BACKWARD = CMD.imark()
+STOP = CMD.imark()
+SPEEDUP = CMD.imark()
+SPEEDOWN = CMD.imark()
+
+CMD7 = CMD.imark()
+CMD8 = CMD.imark()
+
+assert CMD.imark_counter <= COMMAND_MAX_COUNT, f"Commands surpassed maximum limit of {COMMAND_MAX_COUNT}, got {CMD.imark_counter}"
 
 # ------------------------------------------------------------------------
 #  Hardware Abstractions
@@ -23,26 +64,31 @@ def _log(*a):
 class Train:
     """Generic H-bridge DC motor train with direction pins and PWM speed."""
     # TODO: Change to send signals to radio RX instead
-    def __init__(self, name, dir_pin_1, dir_pin_2, pwm_pin, freq=1000):
+    def __init__(self, name, pwm_pin, freq=1000):
         self.name = name
         self.freq = freq
         # TODO: use actual pins
         self._in1 = Pin(dir_pin_1, Pin.OUT)
         self._in2 = Pin(dir_pin_2, Pin.OUT)
         self._pwm = PWM(Pin(pwm_pin))
-        self._pwm.freq(self.freq)
+        self._pwm.freq(1000)           # TODO: pick freq
         self._speed = 0
         self.stop()
 
     # ---------- public API ----------
+    
+    def send_command(self, command):
+        pass
+    
+    
     def mocked(self, name):
-        if DEBUG: print(f"\n\nMocked funcionality: {name}\n\n")
-        else: print("[REMAINDER: Remove mocking]")
+        print(f"\n\nMocked funcionality: {name}\n\n")
 
     def forward(self, speed_pct=None):
         if speed_pct is not None:
             self.set_speed(speed_pct)
-        self._in1.value(1); self._in2.value(0)
+        self._in1.value(1);
+        self._in2.value(0)
         self.mocked("foward")
         return
 
@@ -139,12 +185,12 @@ class TrainManager:
 #  Wi-Fi Access Point
 # ------------------------------------------------------------------------
 def start_ap():
-    AP = network.WLAN(network.AP_IF)
-    AP.config(essid="PicoMotor", password="12345678")
-    AP.active(True)
-    while not AP.active():
+    ap = network.WLAN(network.AP_IF)
+    ap.config(essid="PicoMotor", password="12345678")
+    ap.active(True)
+    while not ap.active():
         sleep_ms(100)
-    print("AP started →", AP.ifconfig()[0])
+    print("AP started →", ap.ifconfig()[0])
 
 # ------------------------------------------------------------------------
 #  Minimal HTTP server – no blocking on multiple clients
@@ -163,7 +209,7 @@ form{border:1px solid #333;padding:1em;border-radius:8px;margin:1em;display:inli
 <h1>Controle Trens</h1>
 
 <form onsubmit="addTrain(event)">
-  <h2>Adicionar Trem</h2>
+  <h2>Adicionar Train</h2>
   <input type="text"   id="n"  placeholder="Nome" value ="TremB" required>
   <input type="number" id="p"  placeholder="Porta" value="15" required>
   <input type="number" id="f"  placeholder="Freq (Hz)" value="2000" required>
@@ -201,8 +247,9 @@ setInterval(refresh,1500);refresh();
         self._sock = socket.socket()
         self._sock.bind(addr)
         self._sock.listen(5)
-        self._sock.settimeout(0)
+        self._sock.settimeout(0)       # non-blocking listener
 
+    # ------------------------------------------------------------
     def loop(self):
         try:
             cl, addr = self._sock.accept()
@@ -285,13 +332,18 @@ setInterval(refresh,1500);refresh();
 
 
 
+# ------------------------------------------------------------------------
+#  Main bootstrap
+# ------------------------------------------------------------------------
 def main():
+    if DEBUG or DRY_RUN:
+        print(f"Warning: Remember to turn off DEBUG (currently {DEBUG}) and or DRY_RUN (currently {DRY_RUN}) off")
+    assert not DRY_RUN, "DRY_RUN mode on, exiting..."
     # ---- create your trains here ----
     mgr = TrainManager()
     # TODO: adjust pins
     mgr.add(Train("TremA", dir_pin_1=2, dir_pin_2=3, pwm_pin=4, freq=1500))
-    #  mgr.add(Train("T2", dir_pin_1=5, dir_pin_2=6, pwm_pin=7))
-
+    #  mgr.add(Train("M2", dir_pin_1=5, dir_pin_2=6, pwm_pin=7))
     start_ap()
     server = WebServer(mgr)
     print("Server running …")
@@ -302,5 +354,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
