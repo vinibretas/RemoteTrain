@@ -1,10 +1,10 @@
 # ------------- main.py ------------- #
 import network, socket, ure, json, uerrno
 from machine import Pin, PWM
-from time import sleep_ms
+from time import sleep_ms, time
 
 DEBUG = True
-DRY_RUN = True
+DRY_RUN = 0
 
 _ERRNO_EAGAIN = uerrno.EAGAIN
 try:
@@ -53,8 +53,8 @@ STOP = CMD.imark()
 SPEEDUP = CMD.imark()
 SPEEDOWN = CMD.imark()
 
-CMD7 = CMD.imark()
-CMD8 = CMD.imark()
+CMD7 = CMD.imark() # Free
+CMD8 = CMD.imark() # Free
 
 assert CMD.imark_counter <= COMMAND_MAX_COUNT, f"Commands surpassed maximum limit of {COMMAND_MAX_COUNT}, got {CMD.imark_counter}"
 
@@ -62,6 +62,8 @@ assert CMD.imark_counter <= COMMAND_MAX_COUNT, f"Commands surpassed maximum limi
 MD = IMarker()
 RX_MODE = MD.imark()
 BRIDGE_MODE = MD.imark()
+
+DEFAULT_MODE = RX_MODE
 # ------------------------------------------------------------------------
 #  Hardware Abstractions
 # ------------------------------------------------------------------------
@@ -89,7 +91,10 @@ class Train:
         self.rx = Pin(rx_pin, Pin.OUT) if self.mode is RX_MODE else None
         self.fwd = Pin(foward_pin, Pin.OUT) if self.mode is BRIDGE_MODE else None
         self.bwd = Pin(backward_pin, Pin.OUT) if self.mode is BRIDGE_MODE else None
-        self.pwm = Pin(pwm_pin, Pin.OUT) if self.mode is BRIDGE_MODE else None
+        self.pwm = PWM(Pin(pwm_pin)) if self.mode is BRIDGE_MODE else None
+        if self.pwm:
+            self.pwm.freq(self.freq)
+
         if DEBUG:
             print(f"self.rx = {self.rx}")
             print(f"self.fwd = {self.fwd}")
@@ -101,24 +106,32 @@ class Train:
     # ---------- public API ----------
 
     def send_command(self, command):
+        print(f"\n\nMocked send command: Would send {command} pulses!\n\n")
         pass
 
 
     def mocked(self, name):
         print(f"\n\nMocked funcionality: {name}\n\n")
 
-    def forward(self, speed_pct=None):
-        if speed_pct is not None:
-            self.set_speed(speed_pct)
-        self._in1.value(1);
-        self._in2.value(0)
+    def forward(self, speed_percent=None):
+        if speed_percent is not None:
+            self.set_speed(speed_percent)
+        if self.mode is BRIDGE_MODE:
+            self.fwd.value(1);
+            self.bwd.value(0)
+        else:
+            self.send_command(FOWARD)
         self.mocked("foward")
         return
 
-    def backward(self, speed_pct=None):
-        if speed_pct is not None:
-            self.set_speed(speed_pct)
-        self._in1.value(0); self._in2.value(1)
+    def backward(self, speed_percent=None):
+        if speed_percent is not None:
+            self.set_speed(speed_percent)
+        if self.mode is BRIDGE_MODE:
+            self.fwd.value(0);
+            self.bwd.value(1)
+        else:
+            self.send_command(BACKWARD)
         self.mocked("backward")
         return
 
@@ -127,7 +140,11 @@ class Train:
 
     def change_speed(self, delta):
         """±delta percentage points, clamped 0-100."""
-        self.set_speed(self._speed + delta)
+        if self.mode is BRIDGE_MODE:
+            self.set_speed(self._speed + delta)
+        else:
+            self._speed + delta
+            self.send_command(SPEEDUP)
         self.mocked(f"change_speed to {self.speed + delta}")
         return
 
@@ -142,16 +159,20 @@ class Train:
         return
 
     def stop(self):
-        self._in1.value(0); self._in2.value(0)
-        self._pwm.duty_u16(0)
+        if self.mode is BRIDGE_MODE:
+            self.fwd.value(0);
+            self.bwd.value(0)
+            self.pwm.duty_u16(0)
+        else:
+            self.send_command(STOP)
         self._speed = 0
         self.mocked("stop")
         return
 
-    def set_speed(self, speed_pct: int):
+    def set_speed(self, speed_percent: int):
         """0–100 → 0–65535 duty"""
 
-        self._speed = max(0, min(100, speed_pct))
+        self._speed = max(0, min(100, speed_percent))
         duty = int(self._speed * 65535 // 100)
         self._pwm.duty_u16(duty)
         self.mocked(f"set_speed to {self._speed}, duty: {duty}")
@@ -196,11 +217,11 @@ class TrainManager:
             train.toggle()
         return train.serialize()
 
-    def create_from_args(self, name, rx_pin, freq):
-        pwm = int(rx_pin)
+    def create_from_args(self, name, rx_pin, freq, mode=DEFAULT_MODE):
+        rx = int(rx_pin)
         f   = int(freq)
         # simple heuristic: dir pins = pwm±1
-        train   = Train(name, dir_pin_1=pwm-1, dir_pin_2=pwm+1, rx_pin=pwm, freq=f)
+        train   = Train(name, dir_pin_1=rx-1, dir_pin_2=rx+1, rx_pin=pwm, freq=f)
         self.add(train)
         return train.serialize()
 
@@ -266,9 +287,17 @@ setInterval(refresh,1500);refresh();
 
     def __init__(self, manager):
         self._m = manager
-        addr = socket.getaddrinfo("0.0.0.0", 80)[0][-1]
+        addrinfo = socket.getaddrinfo("0.0.0.0", 80)
+        addr = addrinfo[0][-1]
         self._sock = socket.socket()
-        self._sock.bind(addr)
+        timout = 5000
+        t0 = time()
+        while time() - t0 > 0:
+            try:
+                self._sock.bind(addr)
+            except OSError:
+                print(f"Failed, trying again ({(time() - t0) / 1000:.2f}s left)")
+                sleep_ms(100)
         self._sock.listen(5)
         self._sock.settimeout(0)       # non-blocking listener
 
@@ -370,7 +399,8 @@ def main():
     # ---- create your trains here ----
     mgr = TrainManager()
     # TODO: adjust pins
-    mgr.add(Train("TremA", dir_pin_1=2, dir_pin_2=3, rx_pin=4, freq=1500))
+    mgr.add(t1)
+    #  mgr.add(Train("TremA", dir_pin_1=2, dir_pin_2=3, rx_pin=4, freq=1500))
     #  mgr.add(Train("M2", dir_pin_1=5, dir_pin_2=6, rx_pin=7))
     start_ap()
     server = WebServer(mgr)
