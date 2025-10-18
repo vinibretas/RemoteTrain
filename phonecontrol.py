@@ -47,6 +47,9 @@ class IMarker:
 # Enum for commands
 CMD = IMarker(1)
 
+#
+#
+#
 STOP = CMD.imark()
 FOWARD = CMD.imark()
 BACKWARD = CMD.imark()
@@ -54,7 +57,6 @@ SPEEDUP = CMD.imark()
 SPEEDOWN = CMD.imark()
 
 OFFSET = COMMAND_MAX_COUNT - CMD.imark_counter
-OFFSET = 0
 _log(f"OFFSET = {OFFSET}")
 
 assert CMD.imark_counter <= COMMAND_MAX_COUNT, f"Commands surpassed maximum limit of {COMMAND_MAX_COUNT}, got {CMD.imark_counter}"
@@ -206,8 +208,19 @@ class Train:
         return
 
     # ---------- helpers ----------
+
+    def pin_number(self, pin: Pin) -> int:
+        if type(pin) is not Pin:
+            raise TypeError(f"pin must be of type machine.Pin, got: `{type(pin)}`")
+        return str(pin).split("GPIO")[1].split(",")[0]
+
     def serialize(self):
-        return {"name": self.name, "speed": self._speed, "freq": self.freq}
+        return {
+            "name": self.name,
+            "speed": self._speed,
+            "freq": self.freq,
+            "gpio" : self.pin_number(self.rx) or self.pin_number(self.pwm_pin)
+        }
 
 # ------------------------------------------------------------------------
 #  Train Manager – Data structure to store trains instances
@@ -249,8 +262,11 @@ class TrainManager:
             print(f"Called `create_from_args(self(TrainManager class), name={name}, rx_pin={rx_pin}, mode={mode})`")
         rx = int(rx_pin)
         f   = int(freq)
-        # simple heuristic: dir pins = pwm±1
-        train   = Train(name, dir_pin_1=rx-1, dir_pin_2=rx+1, rx_pin=pwm, freq=f)
+        # simple heuristic: dir pins = rx±1
+        if mode is BRIDGE_MODE:
+            train   = Train(name, foward_pin=rx-1, backward_pin=rx+1, pwm_pin=rx, freq=f)
+        elif mode is RX_MODE:
+            train = Train(name, freq=f, rx_pin=rx)
         self.add(train)
         return train.serialize()
 
@@ -282,7 +298,7 @@ form{border:1px solid #333;padding:1em;border-radius:8px;margin:1em;display:inli
 <h1>Controle Trens</h1>
 
 <form onsubmit="addTrain(event)">
-  <h2>Adicionar Train</h2>
+  <h2>Adicionar Trem</h2>
   <input type="text"   id="n"  placeholder="Nome" value ="TremB" required>
   <input type="number" id="p"  placeholder="Porta" value="15" required>
   <input type="number" id="f"  placeholder="Freq (Hz)" value="2000" required>
@@ -301,7 +317,7 @@ function addTrain(e){
 }
 function card(train){return`
 <div class="card" id="${train.name}">
-  <h2>${train.name} <small>${train.freq} Hz</small></h2>
+  <h2>${train.name} <small>${train.freq} Hz (GPIO ${train.gpio})</small></h2>
   <button onclick="api('/${train.name}/forward')">⏩ Para Frente</button>
   <button onclick="api('/${train.name}/backward')">⏪ Ré</button>
   <button onclick="api('/${train.name}/toggle')">
@@ -460,8 +476,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
