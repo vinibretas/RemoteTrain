@@ -234,6 +234,8 @@ class TrainManager:
         return train.serialize()
 
     def create_from_args(self, name, rx_pin, freq, mode=DEFAULT_MODE):
+        if DEBUG:
+            print(f"Called `create_from_args(self(TrainManager class), name={name}, rx_pin={rx_pin}, mode={mode})`")
         rx = int(rx_pin)
         f   = int(freq)
         # simple heuristic: dir pins = pwm±1
@@ -306,6 +308,7 @@ setInterval(refresh,1500);refresh();
         addrinfo = socket.getaddrinfo("0.0.0.0", 80)
         addr = addrinfo[0][-1]
         self._sock = socket.socket()
+        self.loop_count = 0
         timout = 5000
         t0 = time()
         while time() - t0 > 0:
@@ -316,12 +319,19 @@ setInterval(refresh,1500);refresh();
                 sleep_ms(100)
         self._sock.listen(5)
         self._sock.settimeout(0)       # non-blocking listener
+        if DEBUG:
+            print(f"Bound socket ({self._sock}) to address: {addr}")
 
     # ------------------------------------------------------------
     def loop(self):
+        self.loop_count += 1
         try:
             cl, addr = self._sock.accept()
+            if DEBUG:
+                print(f"Sucess on sock.accept(): cl=`{cl}`, addr=`{addr}`")
         except OSError as e:
+            if DEBUG and not self.loop_count % 100:
+                print(f"Failed to accept client ({self.loop_count}): error=`{e}`")
             #if e.args[0] in (uerrno.EAGAIN, uerrno.EWOULDBLOCK):
             if e.args[0] in (uerrno.EAGAIN, 1):
                 return                  # no pending client
@@ -332,6 +342,8 @@ setInterval(refresh,1500);refresh();
 
         try:
             req = cl.recv(1024)
+            if DEBUG:
+                print(f"Received from cl: req=`{req}`")
         except OSError as e:
             _log("recv() error:", e)
             cl.close(); return
@@ -341,12 +353,16 @@ setInterval(refresh,1500);refresh();
 
         try:
             route = ure.search(r"GET /(.*?) ", req.decode()).group(1)
+            if DEBUG:
+                print(f"Got route=`{route}`")
         except Exception as e:
             _log("parse error:", e)
             self._send(cl, 400, "text/plain", "Bad request")
             cl.close(); return
 
         _log("Route =", route)
+        if DEBUG:
+            print(f"Route = `{route}`")
 
         # ---------- Static page ----------
         if route in ("", "index.html"):
@@ -395,7 +411,11 @@ setInterval(refresh,1500);refresh();
             cl.send("HTTP/1.1 %d OK\r\nContent-Type:%s\r\nContent-Length:%d\r\n\r\n"
                     % (status, ctype, len(payload)))
             cl.send(payload)
+            if DEBUG:
+                print(f"Sent payload!")
         except Exception as e:
+            if DEBUG:
+                print(f"Failed to send payload: error=`{e}`")
             _log("send error:", e)
 
 
@@ -428,6 +448,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
