@@ -75,7 +75,8 @@ FALLING = EDGE.imark()
 # ------------------------------------------------------------------------
 class Train:
     """Generic H-bridge DC motor train with direction pins"""
-    def __init__(self, name, freq=1000, rx_pin = None, foward_pin = None, backward_pin = None, pwm_pin = None):
+    def __init__(self, name, freq=1000, rx_pin = None, foward_pin = None, backward_pin = None, pwm_pin = None, default_speed = 50):
+        self.default_speed = default_speed
         self.pins_dict = {"rx_pin":rx_pin,"foward_pin":foward_pin,"backward_pin":backward_pin,"pwm_pin":pwm_pin}
         self.pins_str = ", ".join(f"{k} = {v}" for k,v in self.pins_dict.items())
         if all(v is None for v in self.pins_dict.values()):
@@ -133,7 +134,7 @@ class Train:
         if speed_percent is not None:
             self.set_speed(speed_percent)
         elif self._speed == 0:
-            self._speed = 50
+            self._speed = self.default_speed
         if self.mode is BRIDGE_MODE:
             self.fwd.value(1);
             self.bwd.value(0)
@@ -161,11 +162,16 @@ class Train:
         if self.mode is BRIDGE_MODE:
             self.set_speed(self._speed + delta)
         else:
-            self._speed += delta
-            if delta > 0:
-                self.send_command(SPEEDUP)
-            elif delta < 0:
-                self.send_command(SPEEDOWN)
+            if self._speed == 0:
+                if delta < 0:
+                    return
+                self.forward()
+            else:
+                self._speed += delta
+                if delta > 0:
+                    self.send_command(SPEEDUP)
+                elif delta < 0:
+                    self.send_command(SPEEDOWN)
         self.mocked(f"change_speed from {self._speed - delta} to {self._speed} ({'+' if delta > 0 else '-'}{delta if delta > 0 else -delta})")
         return
 
