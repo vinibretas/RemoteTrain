@@ -1,7 +1,7 @@
 # ------------- main.py ------------- #
 import network, socket, ure, json, uerrno
 from machine import Pin, PWM
-from time import sleep_ms, time
+from time import sleep_ms, time, sleep_us
 
 DEBUG = True
 DRY_RUN = 0
@@ -46,15 +46,16 @@ class IMarker:
 
 # Enum for commands
 CMD = IMarker(1)
+STOP = CMD.imark()
 GO = CMD.imark()
 FOWARD = CMD.imark()
 BACKWARD = CMD.imark()
-STOP = CMD.imark()
+
 SPEEDUP = CMD.imark()
 SPEEDOWN = CMD.imark()
 
-CMD7 = CMD.imark() # Free
-CMD8 = CMD.imark() # Free
+OFFSET = COMMAND_MAX_COUNT - CMD.imark_counter
+print(f"OFFSET = {OFFSET}")
 
 assert CMD.imark_counter <= COMMAND_MAX_COUNT, f"Commands surpassed maximum limit of {COMMAND_MAX_COUNT}, got {CMD.imark_counter}"
 
@@ -112,15 +113,17 @@ class Train:
     # ---------- public API ----------
 
     def send_command(self, command, edge = RISING):
+        command += OFFSET
         if not self.rx: 
             raise RuntimeError(".send_command method only compatible with rx mode")
         print(f"\n\nMocked send command: Would send {command} pulses!\n\n")
+        period_us = int(500_000 / self.freq)   # half-period in µs
         edge = 1 if edge is RISING else 0
         for k in range(command):
             self.rx.value(edge)
-            sleep_ms(int(self.period*1000 / 2))
+            sleep_us(period_us)
             self.rx.value(not edge)
-            sleep_ms(int(self.period*1000 / 2))
+            sleep_us(period_us)
         self.rx.value(0)
 
     def mocked(self, name):
@@ -402,7 +405,7 @@ setInterval(refresh,1500);refresh();
 # ------------------------------------------------------------------------
 def main():
     if DEBUG or DRY_RUN:
-        print(f"Warning: Remember to turn off DEBUG (currently {DEBUG}) and or DRY_RUN (currently {DRY_RUN}) off")
+        print(f"Warning: Remember to turn off DEBUG (currently {bool(DEBUG)}) and or DRY_RUN (currently {bool(DRY_RUN)}) off")
     t1 = Train("TestTrain", rx_pin = 4)
     #  t2 = Train("TestTrain", backward_pin = 4, foward_pin=5,pwm_pin=6)
     #  t3 = Train("TestTrain", backward_pin = 1, foward_pin=1, rx_pin=1)
@@ -425,6 +428,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
