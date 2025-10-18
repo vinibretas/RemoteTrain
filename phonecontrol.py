@@ -46,16 +46,16 @@ class IMarker:
 
 # Enum for commands
 CMD = IMarker(1)
+
 STOP = CMD.imark()
-GO = CMD.imark()
 FOWARD = CMD.imark()
 BACKWARD = CMD.imark()
-
 SPEEDUP = CMD.imark()
 SPEEDOWN = CMD.imark()
 
 OFFSET = COMMAND_MAX_COUNT - CMD.imark_counter
-print(f"OFFSET = {OFFSET}")
+OFFSET = 0
+_log(f"OFFSET = {OFFSET}")
 
 assert CMD.imark_counter <= COMMAND_MAX_COUNT, f"Commands surpassed maximum limit of {COMMAND_MAX_COUNT}, got {CMD.imark_counter}"
 
@@ -132,6 +132,8 @@ class Train:
     def forward(self, speed_percent=None):
         if speed_percent is not None:
             self.set_speed(speed_percent)
+        elif self._speed == 0:
+            self._speed = 50
         if self.mode is BRIDGE_MODE:
             self.fwd.value(1);
             self.bwd.value(0)
@@ -159,9 +161,12 @@ class Train:
         if self.mode is BRIDGE_MODE:
             self.set_speed(self._speed + delta)
         else:
-            self._speed + delta
-            self.send_command(SPEEDUP)
-        self.mocked(f"change_speed to {self.speed + delta}")
+            self._speed += delta
+            if delta > 0:
+                self.send_command(SPEEDUP)
+            elif delta < 0:
+                self.send_command(SPEEDOWN)
+        self.mocked(f"change_speed from {self._speed - delta} to {self._speed} ({'+' if delta > 0 else '-'}{delta if delta > 0 else -delta})")
         return
 
     def toggle(self):
@@ -308,29 +313,35 @@ setInterval(refresh,1500);refresh();
         addrinfo = socket.getaddrinfo("0.0.0.0", 80)
         addr = addrinfo[0][-1]
         self._sock = socket.socket()
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.loop_count = 0
-        timout = 5000
+        timeout = 50
         t0 = time()
-        while time() - t0 > 0:
+        sucess_bind = False
+        while time() - t0 < timeout:
             try:
                 self._sock.bind(addr)
-            except OSError:
-                print(f"Failed, trying again ({(time() - t0) / 1000:.2f}s left)")
-                sleep_ms(100)
+                sucess_bind = True
+                break
+            except OSError as e:
+                print(f"Failed ({e}), trying again ({(timeout - time() + t0):.2f}s left)")
+                sleep_ms(1000)
+        if sucess_bind:
+            if DEBUG:
+                print(f"Bound socket ({self._sock}) to address: {addr}")
+        else:
+            print("\n\n\n\nBind failed!!!!!!\n\n\n\n\n")
+            raise OSError("Failed to bind socket")
         self._sock.listen(5)
         self._sock.settimeout(0)       # non-blocking listener
-        if DEBUG:
-            print(f"Bound socket ({self._sock}) to address: {addr}")
 
     # ------------------------------------------------------------
     def loop(self):
         self.loop_count += 1
         try:
             cl, addr = self._sock.accept()
-            if DEBUG:
-                print(f"Sucess on sock.accept(): cl=`{cl}`, addr=`{addr}`")
         except OSError as e:
-            if DEBUG and not self.loop_count % 100:
+            if DEBUG and (not self.loop_count % 1000 or self.loop_count == 1):
                 print(f"Failed to accept client ({self.loop_count}): error=`{e}`")
             #if e.args[0] in (uerrno.EAGAIN, uerrno.EWOULDBLOCK):
             if e.args[0] in (uerrno.EAGAIN, 1):
@@ -342,8 +353,6 @@ setInterval(refresh,1500);refresh();
 
         try:
             req = cl.recv(1024)
-            if DEBUG:
-                print(f"Received from cl: req=`{req}`")
         except OSError as e:
             _log("recv() error:", e)
             cl.close(); return
@@ -353,15 +362,12 @@ setInterval(refresh,1500);refresh();
 
         try:
             route = ure.search(r"GET /(.*?) ", req.decode()).group(1)
-            if DEBUG:
-                print(f"Got route=`{route}`")
         except Exception as e:
             _log("parse error:", e)
             self._send(cl, 400, "text/plain", "Bad request")
             cl.close(); return
 
-        _log("Route =", route)
-        if DEBUG:
+        if DEBUG and route:
             print(f"Route = `{route}`")
 
         # ---------- Static page ----------
@@ -426,7 +432,7 @@ setInterval(refresh,1500);refresh();
 def main():
     if DEBUG or DRY_RUN:
         print(f"Warning: Remember to turn off DEBUG (currently {bool(DEBUG)}) and or DRY_RUN (currently {bool(DRY_RUN)}) off")
-    t1 = Train("TestTrain", rx_pin = 4)
+    t1 = Train("TestTrain", rx_pin = 4, freq=500)
     #  t2 = Train("TestTrain", backward_pin = 4, foward_pin=5,pwm_pin=6)
     #  t3 = Train("TestTrain", backward_pin = 1, foward_pin=1, rx_pin=1)
     #  t4 = Train("TestTrain")
